@@ -4,6 +4,11 @@
  * class, but including a torque for current-induced domain wall motion.
  * Antoine Vanhaverbeke
  * 22/06/2007
+ *
+ * Extended version of Anv_SpinTEvolve to support arbitrary current directions
+ * instead of the hard-coded x direction.
+ * Martin Lang
+ * 04/05/2023
  */
 
 #ifndef _ANV_SPINTEVOLVE
