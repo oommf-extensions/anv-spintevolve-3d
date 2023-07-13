@@ -1,9 +1,14 @@
-/* FILE: spintevolve2.cc                 -*-Mode: c++-*-
+/* FILE: spintevolve_3d.cc                 -*-Mode: c++-*-
  *
  * Concrete evolver class, built built on top of the Oxs_RungeKuttaEvolve
  * class, but including a torque for current-induced domain wall motion.
  * Antoine Vanhaverbeke
  * 22/06/2007
+ *
+ * Extended version of Anv_SpinTEvolve to support arbitrary current directions
+ * instead of the hard-coded x direction.
+ * Martin Lang
+ * 04/05/2023
  */
 
 #include <cfloat>
@@ -13,7 +18,7 @@
 #include "director.h"
 #include "timedriver.h"
 #include "simstate.h"
-#include "spintevolve.h"
+#include "spintevolve_3d.h"
 #include "rectangularmesh.h"
 #include "key.h"
 #include "energy.h"		// Needed to make MSVC++ 5 happy
@@ -21,12 +26,12 @@
 OC_USE_STRING;
 
 // Oxs_Ext registration support
-OXS_EXT_REGISTER(Anv_SpinTEvolve);
+OXS_EXT_REGISTER(Anv_SpinTEvolve_3d);
 
 /* End includes */
 
 // Constructor
-Anv_SpinTEvolve::Anv_SpinTEvolve(
+Anv_SpinTEvolve_3d::Anv_SpinTEvolve_3d(
   const char* name,     // Child instance id
   Oxs_Director* newdtr, // App director
   const char* argstr)   // MIF input block parameters
@@ -42,11 +47,11 @@ Anv_SpinTEvolve::Anv_SpinTEvolve(
 	beta = GetRealInitValue("beta",0.01);
 
 	if(HasInitValue("u")) {
-    OXS_GET_INIT_EXT_OBJECT("u",Oxs_ScalarField,u_init);
+    OXS_GET_INIT_EXT_OBJECT("u",Oxs_VectorField,u_init);
   } else {
     // Default is zero
-    Oxs_Ext* foo=MakeNew("Oxs_UniformScalarField",director,"value 0.0");
-    u_init.SetAsOwner(dynamic_cast<Oxs_ScalarField*>(foo));
+    Oxs_Ext* foo=MakeNew("Oxs_UniformVectorField",director,"value 0.0 0.0 0.0");
+    u_init.SetAsOwner(dynamic_cast<Oxs_VectorField*>(foo));
   }
 	
   if(HasInitValue("u_profile")) {
@@ -174,15 +179,15 @@ Anv_SpinTEvolve::Anv_SpinTEvolve(
   String method = GetStringInitValue("method","rkf54");
   Oxs_ToLower(method); // Do case insensitive match
   if(method.compare("rk2")==0) {
-    rkstep_ptr = &Anv_SpinTEvolve::TakeRungeKuttaStep2;
+    rkstep_ptr = &Anv_SpinTEvolve_3d::TakeRungeKuttaStep2;
   } else if(method.compare("rk4")==0) {
-    rkstep_ptr = &Anv_SpinTEvolve::TakeRungeKuttaStep4;
+    rkstep_ptr = &Anv_SpinTEvolve_3d::TakeRungeKuttaStep4;
   } else if(method.compare("rkf54m")==0) {
-    rkstep_ptr = &Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54M;
+    rkstep_ptr = &Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54M;
   } else if(method.compare("rkf54s")==0) {
-    rkstep_ptr = &Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54S;
+    rkstep_ptr = &Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54S;
   } else if(method.compare("rkf54")==0) {
-    rkstep_ptr = &Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54;
+    rkstep_ptr = &Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54;
   } else {
     throw Oxs_Ext::Error(this,"Invalid initialization detected:"
 			 " \"method\" value must be one of"
@@ -191,19 +196,25 @@ Anv_SpinTEvolve::Anv_SpinTEvolve(
 
   // Setup outputs
   max_dm_dt_output.Setup(this,InstanceName(),"Max dm/dt","deg/ns",0,
-     &Anv_SpinTEvolve::UpdateDerivedOutputs);
+     &Anv_SpinTEvolve_3d::UpdateDerivedOutputs);
   dE_dt_output.Setup(this,InstanceName(),"dE/dt","J/s",0,
-     &Anv_SpinTEvolve::UpdateDerivedOutputs);
+     &Anv_SpinTEvolve_3d::UpdateDerivedOutputs);
   delta_E_output.Setup(this,InstanceName(),"Delta E","J",0,
-     &Anv_SpinTEvolve::UpdateDerivedOutputs);
+     &Anv_SpinTEvolve_3d::UpdateDerivedOutputs);
   ave_u_output.Setup(this,InstanceName(),"average u","m/s",0,
-		 &Anv_SpinTEvolve::UpdateSpinTorqueOutputs);
+		 &Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs);
+  ave_ux_output.Setup(this, InstanceName(), "average ux", "m/s", 0,
+     &Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs);
+  ave_uy_output.Setup(this, InstanceName(), "average uy", "m/s", 0,
+     &Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs);
+  ave_uz_output.Setup(this, InstanceName(), "average uz", "m/s", 0,
+     &Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs);
   dm_dt_output.Setup(this,InstanceName(),"dm/dt","rad/s",1,
-     &Anv_SpinTEvolve::UpdateDerivedOutputs);
+     &Anv_SpinTEvolve_3d::UpdateDerivedOutputs);
   mxH_output.Setup(this,InstanceName(),"mxH","A/m",1,
-     &Anv_SpinTEvolve::UpdateDerivedOutputs);
+     &Anv_SpinTEvolve_3d::UpdateDerivedOutputs);
   spin_torque_output.Setup(this,InstanceName(),"Spin torque","A/m",0,
-     &Anv_SpinTEvolve::UpdateSpinTorqueOutputs);
+     &Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs);
 
   VerifyAllInitArgsUsed();
 
@@ -211,13 +222,16 @@ Anv_SpinTEvolve::Anv_SpinTEvolve(
   director->ReserveSimulationStateRequest(1);
 }
 
-OC_BOOL Anv_SpinTEvolve::Init()
+OC_BOOL Anv_SpinTEvolve_3d::Init()
 {
   // Setup outputs
   max_dm_dt_output.Register(director,-5);
   dE_dt_output.Register(director,-5);
   delta_E_output.Register(director,-5);
   ave_u_output.Register(director,-5);
+  ave_ux_output.Register(director, -5);
+  ave_uy_output.Register(director, -5);
+  ave_uz_output.Register(director, -5);
   dm_dt_output.Register(director,-5);
   mxH_output.Register(director,-5);
 	spin_torque_output.Register(director,-5);
@@ -256,40 +270,45 @@ OC_BOOL Anv_SpinTEvolve::Init()
   return 1;
 }
 
-Anv_SpinTEvolve::~Anv_SpinTEvolve()
+Anv_SpinTEvolve_3d::~Anv_SpinTEvolve_3d()
 {}
 
 
-void Anv_SpinTEvolve::UpdateMeshArrays(const Oxs_Mesh* mesh)
+void Anv_SpinTEvolve_3d::UpdateMeshArrays(const Oxs_Mesh* mesh)
 {
   mesh_id = 0; // Mark update in progress
 
   const Oxs_RectangularMesh* rmesh
     = dynamic_cast<const Oxs_RectangularMesh*>(mesh);
   if(rmesh==NULL) {
-    String msg="Import mesh to Anv_SpinTEvolve::UpdateMeshArrays"
+    String msg="Import mesh to Anv_SpinTEvolve_3d::UpdateMeshArrays"
       " is not an Oxs_RectangularMesh object.";
     throw Oxs_Ext::Error(msg.c_str());
   }
   Xstep = rmesh->EdgeLengthX();
-	n_x = rmesh->DimX();
+  Ystep = rmesh->EdgeLengthY();
+  Zstep = rmesh->EdgeLengthZ();
+  n_x = rmesh->DimX();
+  n_y = rmesh->DimY();
+  n_z = rmesh->DimZ();
+  n_xy = n_x*n_y;
   
 	u_init->FillMeshValue(mesh,u);
 
   // Zero spin torque on fixed spins
 	const OC_INDEX size = mesh->Size();
 	OC_INDEX i,j;
-  ave_u = 0.0;
+  ave_u.Set(0.0, 0.0, 0.0);
   for(i=0;i<size;i++) {
     ave_u += u[i];
 	}
-	if(size>0) ave_u /= size;
+	if(size>0) ave_u *= 1./size;  // operator/= is not implemented
 
   UpdateFixedSpinList(mesh); // Safety
   const OC_INDEX fixed_count = GetFixedSpinCount();
   for(j=0;j<fixed_count;j++) {
     OC_INDEX i = GetFixedSpin(j);
-		u[i]=0;
+		u[i].Set(0.0,0.0,0.0);
   }
 
   alpha_init->FillMeshValue(mesh,alpha);
@@ -310,7 +329,7 @@ void Anv_SpinTEvolve::UpdateMeshArrays(const Oxs_Mesh* mesh)
 
 
 
-OC_REAL8m Anv_SpinTEvolve::EvaluateuProfileScript
+OC_REAL8m Anv_SpinTEvolve_3d::EvaluateuProfileScript
 (OC_UINT4m stage,
  OC_REAL8m stage_time,
  OC_REAL8m total_time) const
@@ -344,7 +363,7 @@ OC_REAL8m Anv_SpinTEvolve::EvaluateuProfileScript
   return static_cast<OC_REAL8m>(result);
 }
 
-void Anv_SpinTEvolve::Calculate_dm_dt
+void Anv_SpinTEvolve_3d::Calculate_dm_dt
 (const Oxs_SimState& state_,
  const Oxs_MeshValue<ThreeVector>& mxH_,
  OC_REAL8m pE_pt_,
@@ -400,11 +419,23 @@ void Anv_SpinTEvolve::Calculate_dm_dt
                           state_.stage_start_time+state_.stage_elapsed_time);
 
   if(ave_u_output.GetCacheRequestCount()>0) {
-    ave_u_output.cache.value = ave_u * umult;
+    ave_u_output.cache.value = (ave_u * umult).Mag();
     ave_u_output.cache.state_id=state_.Id();
   }
+  if (ave_ux_output.GetCacheRequestCount() > 0) {
+    ave_ux_output.cache.value = (ave_u.x * umult);
+    ave_ux_output.cache.state_id = state_.Id();
+  }
+  if (ave_uy_output.GetCacheRequestCount() > 0) {
+    ave_uy_output.cache.value = (ave_u.y * umult);
+    ave_uy_output.cache.state_id = state_.Id();
+  }
+  if (ave_uz_output.GetCacheRequestCount() > 0) {
+    ave_uz_output.cache.value = (ave_u.z * umult);
+    ave_uz_output.cache.state_id = state_.Id();
+  }
 
-	//vtmp.AdjustSize(mesh);
+        //vtmp.AdjustSize(mesh);
 
   for(i=0;i<size;i++) {
 		//vtmp[i].Set(0.0,0.0,0.0);
@@ -412,8 +443,10 @@ void Anv_SpinTEvolve::Calculate_dm_dt
       dm_dt_[i].Set(0.0,0.0,0.0); 
     } else {
 			
-			OC_INDEX x=0;
-			x=i%n_x;
+			//OC_INDEX x=0;
+			OC_INDEX x = i%n_x;
+      OC_INDEX y = (i/n_x)%n_y;
+      OC_INDEX z = i/n_xy;
       const OC_REAL8m cell_alpha = alpha[i];
       const OC_REAL8m cell_mgamma = -1*gamma[i]; // -1 * Landau-Lifshitz gamma gamma_LL=gamma_G/(1+alpha^2)
 			ThreeVector mxH = dm_dt_[i];
@@ -428,9 +461,12 @@ void Anv_SpinTEvolve::Calculate_dm_dt
 
 			ThreeVector base = spin_[i];
 			ThreeVector gradx_m(0.,0.,0.);
-			ThreeVector m_gradx_m(0.,0.,0.);
+      ThreeVector grady_m(0., 0., 0.);
+      ThreeVector gradz_m(0., 0., 0.);
+      ThreeVector m_gradx_m(0.,0.,0.);
 			ThreeVector m_m_gradx_m(0.,0.,0.);
 			ThreeVector inter_dEdt(0.,0.,0.);
+      // ux * dm/dx
 			if(x>0) {
 				j = i-1;
 				if(Ms_[j]!=0.0) {
@@ -458,8 +494,71 @@ void Anv_SpinTEvolve::Calculate_dm_dt
 				}
 			}
 			gradx_m *= (1/Xstep);
-			gradx_m *= u[i];// gradx_m=u*pm_px
-			gradx_m *= umult;
+			gradx_m *= u[i].x;// gradx_m=u*pm_px
+
+      // uy * dm/dy
+      if (y > 0) {
+        j = i - n_x;
+        if (Ms_[j] != 0.0) {
+          grady_m = 0.5 * (base - spin_[j]);
+        }
+      }
+      if (y < n_y - 1) {
+        j = i + n_x;
+        if (Ms_[j] != 0.0) {
+          grady_m += 0.5 * (spin_[j] - base);
+        }
+      }
+      if (n_y > 2) { // Free boundary correction
+        if (y == 0) {
+          j = i + n_x;
+          if (Ms_[j] != 0.0) {
+            grady_m += 0.5 * (spin_[j] - base);
+          }
+        }
+        if (y == n_y - 1) {
+          j = i - n_x;
+          if (Ms_[j] != 0.0) {
+            grady_m += 0.5 * (base - spin_[j]);
+          }
+        }
+      }
+      grady_m *= (1 / Ystep);
+      grady_m *= u[i].y; // grady_m=u*pm_px
+
+      // uz * dm/dz
+      if (z > 0) {
+        j = i - n_xy;
+        if (Ms_[j] != 0.0) {
+          gradz_m = 0.5 * (base - spin_[j]);
+        }
+      }
+      if (z < n_z - 1) {
+        j = i + n_xy;
+        if (Ms_[j] != 0.0) {
+          gradz_m += 0.5 * (spin_[j] - base);
+        }
+      }
+      if (n_z > 2) { // Free boundary correction
+        if (z == 0) {
+          j = i + n_xy;
+          if (Ms_[j] != 0.0) {
+            gradz_m += 0.5 * (spin_[j] - base);
+          }
+        }
+        if (z == n_z - 1) {
+          j = i - n_xy;
+          if (Ms_[j] != 0.0) {
+            gradz_m += 0.5 * (base - spin_[j]);
+          }
+        }
+      }
+      gradz_m *= (1 / Zstep);
+      gradz_m *= u[i].z; // gradz_m=u*pm_px
+
+      // overwrite gradx_m to be (u \cdot \nabla) m
+      gradx_m = gradx_m + grady_m + gradz_m;
+      gradx_m *= umult;
 			m_gradx_m = spin_[i];
 			m_gradx_m ^= gradx_m; // u*m^pm_px
 
@@ -525,7 +624,7 @@ void Anv_SpinTEvolve::Calculate_dm_dt
   return;
 }
 
-void Anv_SpinTEvolve::CheckCache(const Oxs_SimState& cstate)
+void Anv_SpinTEvolve_3d::CheckCache(const Oxs_SimState& cstate)
 {
   // Pull cached values out from cstate.
   // If cstate.Id() == energy_state_id, then cstate has been run
@@ -559,13 +658,13 @@ void Anv_SpinTEvolve::CheckCache(const Oxs_SimState& cstate)
 
   if(!cache_good) {
     throw Oxs_Ext::Error(this,
-       "Anv_SpinTEvolve::CheckCache: Invalid data cache.");
+       "Anv_SpinTEvolve_3d::CheckCache: Invalid data cache.");
   }
 }
 
 
 void
-Anv_SpinTEvolve::AdjustState
+Anv_SpinTEvolve_3d::AdjustState
 (OC_REAL8m hstep,
  OC_REAL8m mstep,
  const Oxs_SimState& old_state,
@@ -580,7 +679,7 @@ Anv_SpinTEvolve::AdjustState
 
   if(!dm_dt.CheckMesh(old_state.mesh)) {
     throw Oxs_Ext::Error(this,
-			 "Anv_SpinTEvolve::AdjustState:"
+			 "Anv_SpinTEvolve_3d::AdjustState:"
 			 " Import spin and dm_dt are different sizes.");
   }
   new_spin.AdjustSize(old_state.mesh);
@@ -627,16 +726,16 @@ Anv_SpinTEvolve::AdjustState
   }
 
   // Don't touch iteration counts. (?!)  The problem is that one call
-  // to Anv_SpinTEvolve::Step() takes 2 half-steps, and it is the
+  // to Anv_SpinTEvolve_3d::Step() takes 2 half-steps, and it is the
   // result from these half-steps that are used as the export state.
   // If we increment the iteration count each time through here, then
   // the iteration count goes up by 2 for each call to Step().  So
   // instead, we leave iteration count at whatever value was filled
-  // in by the Anv_SpinTEvolve::NegotiateTimeStep() method.
+  // in by the Anv_SpinTEvolve_3d::NegotiateTimeStep() method.
 }
 
 
-void Anv_SpinTEvolve::UpdateTimeFields
+void Anv_SpinTEvolve_3d::UpdateTimeFields
 (const Oxs_SimState& cstate,
  Oxs_SimState& nstate,
  OC_REAL8m stepsize) const
@@ -654,7 +753,7 @@ void Anv_SpinTEvolve::UpdateTimeFields
   }
 }
 
-void Anv_SpinTEvolve::NegotiateTimeStep
+void Anv_SpinTEvolve_3d::NegotiateTimeStep
 (const Oxs_TimeDriver* driver,
  const Oxs_SimState&  cstate,
  Oxs_SimState& nstate,
@@ -670,19 +769,19 @@ void Anv_SpinTEvolve::NegotiateTimeStep
   OC_REAL8m max_dm_dt;
   if(!cstate.GetDerivedData("Max dm/dt",max_dm_dt)) {
     throw Oxs_Ext::Error(this,
-       "Anv_SpinTEvolve::NegotiateTimeStep: max_dm_dt not cached.");
+       "Anv_SpinTEvolve_3d::NegotiateTimeStep: max_dm_dt not cached.");
   }
   OC_REAL8m timestep_lower_bound=0.;  // Smallest timestep that can actually
   /// change spin with max_dm_dt (due to OC_REAL8_EPSILON restrictions).
   if(!cstate.GetDerivedData("Timestep lower bound",
 			    timestep_lower_bound)) {
     throw Oxs_Ext::Error(this,
-       "Anv_SpinTEvolve::NegotiateTimeStep: "
+       "Anv_SpinTEvolve_3d::NegotiateTimeStep: "
        " timestep_lower_bound not cached.");
   }
   if(timestep_lower_bound<=0.0) {
     throw Oxs_Ext::Error(this,
-       "Anv_SpinTEvolve::NegotiateTimeStep: "
+       "Anv_SpinTEvolve_3d::NegotiateTimeStep: "
        " cached timestep_lower_bound value not positive.");
   }
 
@@ -731,7 +830,7 @@ void Anv_SpinTEvolve::NegotiateTimeStep
 
 
 OC_BOOL
-Anv_SpinTEvolve::CheckError
+Anv_SpinTEvolve_3d::CheckError
 (OC_REAL8m global_error_order,
  OC_REAL8m error,
  OC_REAL8m stepsize,
@@ -844,7 +943,7 @@ Anv_SpinTEvolve::CheckError
   return good_step;
 }
 
-void Anv_SpinTEvolve::TakeRungeKuttaStep2
+void Anv_SpinTEvolve_3d::TakeRungeKuttaStep2
 (OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
  const Oxs_MeshValue<ThreeVector>& current_dm_dt,
@@ -937,7 +1036,7 @@ void Anv_SpinTEvolve::TakeRungeKuttaStep2
      !endstate->AddDerivedData("pE/pt",pE_pt) ||
      !endstate->AddDerivedData("dE/dt",dE_dt)) {
     throw Oxs_Ext::Error(this,
-			 "Anv_SpinTEvolve::TakeRungeKuttaStep2:"
+			 "Anv_SpinTEvolve_3d::TakeRungeKuttaStep2:"
 			 " Programming error; data cache already set.");
   }
   OC_REAL8m max_err_sq = 0.0;
@@ -956,7 +1055,7 @@ void Anv_SpinTEvolve::TakeRungeKuttaStep2
   new_energy_and_dmdt_computed = 1;
 }
 
-void Anv_SpinTEvolve::TakeRungeKuttaStep4
+void Anv_SpinTEvolve_3d::TakeRungeKuttaStep4
 (OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
  const Oxs_MeshValue<ThreeVector>& current_dm_dt,
@@ -1188,7 +1287,7 @@ void Anv_SpinTEvolve::TakeRungeKuttaStep4
   new_energy_and_dmdt_computed = 0;
 }
 
-void Anv_SpinTEvolve::RungeKuttaFehlbergBase54
+void Anv_SpinTEvolve_3d::RungeKuttaFehlbergBase54
 (RKF_SubType method,
  OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
@@ -1468,7 +1567,7 @@ void Anv_SpinTEvolve::RungeKuttaFehlbergBase54
     break;
   default:
     throw Oxs_Ext::Error(this,
-		 "Anv_SpinTEvolve::RungeKuttaFehlbergBase54:"
+		 "Anv_SpinTEvolve_3d::RungeKuttaFehlbergBase54:"
 		 " Programming error; Invalid sub-type.");
   }
 
@@ -1597,7 +1696,7 @@ void Anv_SpinTEvolve::RungeKuttaFehlbergBase54
      !endstate.AddDerivedData("pE/pt",pE_pt) ||
      !endstate.AddDerivedData("dE/dt",dE_dt)) {
     throw Oxs_Ext::Error(this,
-		 "Anv_SpinTEvolve::RungeKuttaFehlbergBase54:"
+		 "Anv_SpinTEvolve_3d::RungeKuttaFehlbergBase54:"
 		 " Programming error; data cache already set.");
   }
   // Array holdings: A=dm_dt7   B=dD(3,6)   C=dm_dt4   D=dm_dt5
@@ -1624,7 +1723,7 @@ void Anv_SpinTEvolve::RungeKuttaFehlbergBase54
   new_energy_and_dmdt_computed = 1;
 }
 
-void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54
+void Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54
 (OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
  const Oxs_MeshValue<ThreeVector>& current_dm_dt,
@@ -1641,7 +1740,7 @@ void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54
      new_energy_and_dmdt_computed);
 }
 
-void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54M
+void Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54M
 (OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
  const Oxs_MeshValue<ThreeVector>& current_dm_dt,
@@ -1658,7 +1757,7 @@ void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54M
      new_energy_and_dmdt_computed);
 }
 
-void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54S
+void Anv_SpinTEvolve_3d::TakeRungeKuttaFehlbergStep54S
 (OC_REAL8m stepsize,
  Oxs_ConstKey<Oxs_SimState> current_state_key,
  const Oxs_MeshValue<ThreeVector>& current_dm_dt,
@@ -1675,14 +1774,14 @@ void Anv_SpinTEvolve::TakeRungeKuttaFehlbergStep54S
      new_energy_and_dmdt_computed);
 }
 
-OC_REAL8m Anv_SpinTEvolve::MaxDiff
+OC_REAL8m Anv_SpinTEvolve_3d::MaxDiff
 (const Oxs_MeshValue<ThreeVector>& vecA,
  const Oxs_MeshValue<ThreeVector>& vecB)
 {
   OC_INDEX size = vecA.Size();
   if(vecB.Size()!=size) {
     throw Oxs_Ext::Error(this,
-		 "Anv_SpinTEvolve::MaxDiff:"
+		 "Anv_SpinTEvolve_3d::MaxDiff:"
 		 " Import MeshValues incompatible (different lengths).");
   }
   OC_REAL8m max_magsq = 0.0;
@@ -1694,7 +1793,7 @@ OC_REAL8m Anv_SpinTEvolve::MaxDiff
   return sqrt(max_magsq);
 }
 
-void Anv_SpinTEvolve::AdjustStepHeadroom(OC_INT4m step_reject)
+void Anv_SpinTEvolve_3d::AdjustStepHeadroom(OC_INT4m step_reject)
 { // step_reject should be 0 or 1, reflecting whether the current
   // step was rejected or not.  This routine updates reject_ratio
   // and adjusts step_headroom appropriately.
@@ -1718,7 +1817,7 @@ void Anv_SpinTEvolve::AdjustStepHeadroom(OC_INT4m step_reject)
 }
 
 OC_BOOL
-Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
+Anv_SpinTEvolve_3d::Step(const Oxs_TimeDriver* driver,
                       Oxs_ConstKey<Oxs_SimState> current_state_key,
                       const Oxs_DriverStepInfo& step_info,
                       Oxs_Key<Oxs_SimState>& next_state_key)
@@ -1748,7 +1847,7 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
       start_dm_active = 0;
     } else {
       throw Oxs_Ext::Error(this,
-	   "Anv_SpinTEvolve::Step; Programming error:"
+	   "Anv_SpinTEvolve_3d::Step; Programming error:"
 	   " unrecognized stage_init_step_control value");
     }
   }
@@ -1842,12 +1941,12 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
   // -mjd, 21-July-2004
   OC_REAL8m current_dE_dt,new_dE_dt;
   if(!cstate.GetDerivedData("dE/dt",current_dE_dt)) {
-    throw Oxs_Ext::Error(this,"Anv_SpinTEvolve::Step:"
+    throw Oxs_Ext::Error(this,"Anv_SpinTEvolve_3d::Step:"
 			 " current dE/dt not cached.");
   }
   if(new_energy_and_dmdt_computed) {
     if(!nstate.GetDerivedData("dE/dt",new_dE_dt)) {
-      throw Oxs_Ext::Error(this,"Anv_SpinTEvolve::Step:"
+      throw Oxs_Ext::Error(this,"Anv_SpinTEvolve_3d::Step:"
 			   " new dE/dt not cached.");
     }
   } else {
@@ -1858,7 +1957,7 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
     mxH_output.cache.state_id=nstate.Id();
     if(!nstate.AddDerivedData("pE/pt",new_pE_pt)) {
       throw Oxs_Ext::Error(this,
-	   "Anv_SpinTEvolve::Step:"
+	   "Anv_SpinTEvolve_3d::Step:"
 	   " Programming error; data cache (pE/pt) already set.");
     }
     OC_REAL8m new_max_dm_dt,new_timestep_lower_bound;
@@ -1874,7 +1973,7 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
        !nstate.AddDerivedData("Max dm/dt",new_max_dm_dt) ||
        !nstate.AddDerivedData("dE/dt",new_dE_dt)) {
       throw Oxs_Ext::Error(this,
-			   "Anv_SpinTEvolve::Step:"
+			   "Anv_SpinTEvolve_3d::Step:"
 			   " Programming error; data cache already set.");
     }
   }
@@ -1896,7 +1995,7 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
   }
   if(!nstate.AddDerivedData("Delta E",dE)) {
     throw Oxs_Ext::Error(this,
-	 "Anv_SpinTEvolve::Step:"
+	 "Anv_SpinTEvolve_3d::Step:"
 	 " Programming error; data cache (Delta E) already set.");
   }
 
@@ -1946,8 +2045,8 @@ Anv_SpinTEvolve::Step(const Oxs_TimeDriver* driver,
   return 1; // Accept step
 }
 
-void Anv_SpinTEvolve::UpdateDerivedOutputs(const Oxs_SimState& state)
-{ // This routine fills all the Anv_SpinTEvolve Oxs_ScalarOutput's to
+void Anv_SpinTEvolve_3d::UpdateDerivedOutputs(const Oxs_SimState& state)
+{ // This routine fills all the Anv_SpinTEvolve_3d Oxs_ScalarOutput's to
   // the appropriate value based on the import "state", and any of
   // Oxs_VectorOutput's that have CacheRequest enabled are filled.
   // It also makes sure all the expected WOO objects in state are
@@ -2007,7 +2106,7 @@ void Anv_SpinTEvolve::UpdateDerivedOutputs(const Oxs_SimState& state)
 	// matter we can't at present.  Should give this more thought.
 	// -mjd, 27-July-2001
 	throw Oxs_Ext::Error(this,
-	   "Anv_SpinTEvolve::UpdateDerivedOutputs:"
+	   "Anv_SpinTEvolve_3d::UpdateDerivedOutputs:"
 	   " Can't derive Delta E from single state.");
       }
       state.AddDerivedData("Delta E",0.0);
@@ -2025,7 +2124,7 @@ void Anv_SpinTEvolve::UpdateDerivedOutputs(const Oxs_SimState& state)
     = state.Id();
 }
 
-void Anv_SpinTEvolve::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
+void Anv_SpinTEvolve_3d::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
 {
   const Oxs_Mesh* mesh = state.mesh;
   const OC_INDEX size = mesh->Size();
@@ -2056,8 +2155,10 @@ void Anv_SpinTEvolve::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
         stt[i].Set(0.0,0.0,0.0);
       } else {
       
-			OC_INDEX x=0;
-			x=i%n_x;
+			OC_INDEX x = i%n_x;
+      OC_INDEX y = (i / n_x) % n_y;
+      OC_INDEX z = i / n_xy;
+
       //const OC_REAL8m cell_alpha = alpha[i];
       //const OC_REAL8m cell_mgamma = -1*gamma[i]; // -1 * Landau-Lifshitz gamma
 	
@@ -2065,10 +2166,13 @@ void Anv_SpinTEvolve::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
 
 			ThreeVector base = spin_[i];
 			ThreeVector gradx_m(0.,0.,0.);
-			ThreeVector m_gradx_m(0.,0.,0.);
+      ThreeVector grady_m(0., 0., 0.);
+      ThreeVector gradz_m(0., 0., 0.);
+      ThreeVector m_gradx_m(0.,0.,0.);
 			ThreeVector m_m_gradx_m(0.,0.,0.);
-			ThreeVector vtmp(0.,0.,0.);;
+			ThreeVector vtmp(0.,0.,0.);
 
+      // ux * dm/dx
 			if(x>0) {
 				j = i-1;
 				if(Ms[j]!=0.0) {
@@ -2096,8 +2200,71 @@ void Anv_SpinTEvolve::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
 				}
 			}
 			gradx_m *= (1/Xstep);
-			gradx_m *= u[i];// gradx_m=u*pm_px
-			gradx_m *= umult;
+			gradx_m *= u[i].x;// gradx_m=u*pm_px
+
+      // uy * dm/dy
+      if (y > 0) {
+        j = i - n_x;
+        if (Ms[j] != 0.0) {
+          grady_m = 0.5 * (base - spin_[j]);
+        }
+      }
+      if (y < n_y - 1) {
+        j = i + n_x;
+        if (Ms[j] != 0.0) {
+          grady_m += 0.5 * (spin_[j] - base);
+        }
+      }
+      if (n_y > 2) { // Free boundary correction
+        if (y == 0) {
+          j = i + n_x;
+          if (Ms[j] != 0.0) {
+            grady_m += 0.5 * (spin_[j] - base);
+          }
+        }
+        if (y == n_y - 1) {
+          j = i - n_x;
+          if (Ms[j] != 0.0) {
+            grady_m += 0.5 * (base - spin_[j]);
+          }
+        }
+      }
+      grady_m *= (1 / Ystep);
+      grady_m *= u[i].y; // grady_m=u*pm_px
+
+      // uz * dm/dz
+      if (z > 0) {
+        j = i - n_xy;
+        if (Ms[j] != 0.0) {
+          gradz_m = 0.5 * (base - spin_[j]);
+        }
+      }
+      if (z < n_z - 1) {
+        j = i + n_xy;
+        if (Ms[j] != 0.0) {
+          gradz_m += 0.5 * (spin_[j] - base);
+        }
+      }
+      if (n_z > 2) { // Free boundary correction
+        if (z == 0) {
+          j = i + n_xy;
+          if (Ms[j] != 0.0) {
+            gradz_m += 0.5 * (spin_[j] - base);
+          }
+        }
+        if (z == n_z - 1) {
+          j = i - n_xy;
+          if (Ms[j] != 0.0) {
+            gradz_m += 0.5 * (base - spin_[j]);
+          }
+        }
+      }
+      gradz_m *= (1 / Zstep);
+      gradz_m *= u[i].z; // gradz_m=u*pm_px
+
+      // overwrite gradx_m to be (u \cdot \nabla) m
+      gradx_m = gradx_m + grady_m + gradz_m;
+      gradx_m *= umult;
 
 			m_gradx_m = spin_[i];
 			m_gradx_m ^= gradx_m; // u*m^pm_px
@@ -2119,7 +2286,19 @@ void Anv_SpinTEvolve::UpdateSpinTorqueOutputs(const Oxs_SimState& state)
   }
 
 	if(ave_u_output.GetCacheRequestCount()>0) {
-			ave_u_output.cache.value=ave_u*umult;
+    ave_u_output.cache.value=(ave_u*umult).Mag();
 			ave_u_output.cache.state_id = state.Id();
 	}
+  if (ave_ux_output.GetCacheRequestCount() > 0) {
+    ave_ux_output.cache.value = (ave_u.x * umult);
+    ave_ux_output.cache.state_id = state.Id();
+  }
+  if (ave_uy_output.GetCacheRequestCount() > 0) {
+    ave_uy_output.cache.value = (ave_u.y * umult);
+    ave_uy_output.cache.state_id = state.Id();
+  }
+  if (ave_uz_output.GetCacheRequestCount() > 0) {
+    ave_uz_output.cache.value = (ave_u.z * umult);
+    ave_uz_output.cache.state_id = state.Id();
+  }
 }
