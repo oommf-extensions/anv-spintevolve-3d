@@ -812,7 +812,7 @@ void Anv_SpinTEvolve_3d::NegotiateTimeStep
   nstate.stage_iteration_count = cstate.stage_iteration_count + 1;
 
   // Additional timestep control
-  driver->FillStateSupplemental(nstate);
+  driver->FillStateSupplemental(cstate,nstate);
 
   // Check for forced step
   force_step = 0;
@@ -1835,7 +1835,7 @@ Anv_SpinTEvolve_3d::Step(const Oxs_TimeDriver* driver,
   OC_BOOL start_dm_active=0;
   if(next_timestep<=0.0 ||
      (cstate.stage_iteration_count<1
-      && step_info.current_attempt_count==0)) {
+      && step_info.GetCurrentAttemptCount()==0)) {
     if(cstate.stage_number==0
        || stage_init_step_control == SISC_START_DM) {
       start_dm_active = 1;
