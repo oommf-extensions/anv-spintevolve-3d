@@ -812,7 +812,11 @@ void Anv_SpinTEvolve_3d::NegotiateTimeStep
   nstate.stage_iteration_count = cstate.stage_iteration_count + 1;
 
   // Additional timestep control
+#if OOMMF_API_INDEX < 20230325
+  driver->FillStateSupplemental(nstate);
+#else
   driver->FillStateSupplemental(cstate,nstate);
+#endif
 
   // Check for forced step
   force_step = 0;
