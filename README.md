@@ -15,6 +15,8 @@ version of the extension can be seen in
 it is distributed as part of OOMMF and taken from the OOMMF source distribution (further details are availble under https://math.nist.gov/oommf/contrib/oxsext/).
 The modified version supports arbitrary current directions (`3d`).
 
+The current `main` is compatible with OOMMF 2.1a0, for OOMMF 2.0b use the [release 1.0](https://github.com/oommf-extensions/anv-spintevolve-3d/releases/tag/v1.0)
+
 Support in [Ubermag](https://ubermag.github.io) will be provided in the next release.
 
 ## Installation options
